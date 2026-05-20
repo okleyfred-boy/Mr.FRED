@@ -1,0 +1,6 @@
+{
+  "name": "Ghana Smart Water Portal",
+  "description": "Smart national water loss reduction dashboard detecting leaks, illegal connections, and billing arrears for Ghana Water authorities and citizens.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
