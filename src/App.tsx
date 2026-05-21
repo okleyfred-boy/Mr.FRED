@@ -33,6 +33,21 @@ import { IotSensor, ReportTicket, CitizenBill, DistrictStats } from "./types";
 export default function App() {
   const [currentRole, setCurrentRole] = useState<"authority" | "technician" | "citizen">("authority");
   
+  // Interactive GIS Map Active District Selection
+  const [selectedMapDistrict, setSelectedMapDistrict] = useState<string>("Accra West (Weija)");
+  
+  // AI Smart Billing Reminder State
+  const [smartSMSContent, setSmartSMSContent] = useState<string>("");
+  const [fetchingSMS, setFetchingSMS] = useState<boolean>(false);
+  const [smsDispatchedNotification, setSmsDispatchedNotification] = useState<boolean>(false);
+
+  // Real-Time automatic sensor alert feed ticker
+  const [autodispatchLogs, setAutodispatchLogs] = useState<Array<{id: string, time: string, message: string, severity: 'warn' | 'info' | 'critical'}>>([
+    { id: "LOG-1", time: "14:48", message: "System Auto-Trigger: High flow discrepancy check dispatch sent to commercial bypass team in Tema heavy ring pipeline.", severity: "critical" },
+    { id: "LOG-2", time: "14:32", message: "Dispatch Success: Assigned rapid-response crew and local contractor to Kumasi Metro Adum resident bypass valve.", severity: "info" },
+    { id: "LOG-3", time: "14:15", message: "Pressure Drop Flag: Weija Sector mains registers anomalous 1.8 Bar. Acoustic leakage squad deployed.", severity: "warn" }
+  ]);
+
   // User Authentication State
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
   const [isSignInModalOpen, setIsSignInModalOpen] = useState(false);
@@ -66,6 +81,15 @@ export default function App() {
   });
   const [submittingReport, setSubmittingReport] = useState(false);
   const [reportSuccess, setReportSuccess] = useState<string | null>(null);
+  const [attachedPhoto, setAttachedPhoto] = useState<string | null>(null);
+  const [customPhotoUploadName, setCustomPhotoUploadName] = useState<string>("");
+
+  // WhatsApp/SMS phone simulator state definitions
+  const [activeMsgChannel, setActiveMsgChannel] = useState<"sms" | "whatsapp">("sms");
+  const [showPhoneUSSD, setShowPhoneUSSD] = useState<boolean>(false);
+  const [momoSimInputCode, setMomoSimInputCode] = useState<string>("");
+  const [momoSimTxnSuccess, setMomoSimTxnSuccess] = useState<boolean>(false);
+  const [momoSimError, setMomoSimError] = useState<string | null>(null);
 
   // Bill payment Modal/Inline Simulator
   const [selectedBill, setSelectedBill] = useState<CitizenBill | null>(null);
@@ -160,6 +184,19 @@ export default function App() {
     }
   };
 
+  // Handle Photo Upload & preview
+  const handlePhotoUploadChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setCustomPhotoUploadName(file.name);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setAttachedPhoto(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   // Citizen Report Submit
   const handleReportSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -183,7 +220,8 @@ export default function App() {
         gpsLocation: {
           latitude: newReport.lat,
           longitude: newReport.lng
-        }
+        },
+        photoUrl: attachedPhoto || ""
       };
 
       const res = await fetch("/api/reports", {
@@ -201,6 +239,8 @@ export default function App() {
       setReportSuccess(`Kyerɛw krataa bi dze ma hɛn (Report Submitted)! Your report was filed with ticket ID: ${resultTicket.id}. Our AI has instantly computed GWCL diagnostic recommendations.`);
       
       // Clear form except name/phone
+      setAttachedPhoto(null);
+      setCustomPhotoUploadName("");
       setNewReport({
         ...newReport,
         title: "",
@@ -260,6 +300,55 @@ export default function App() {
       setDistricts(await resDistricts.json());
     } catch (err: any) {
       alert("Transaction Error: " + err.message);
+    } finally {
+      setIsPaying(false);
+    }
+  };
+
+  // Submit Simulated MoMo Payment from Interactive Phone Sandbox
+  const handleSimulatedMoMoSubmit = async () => {
+    if (!selectedBill) return;
+    if (momoSimInputCode.length < 4) {
+      setMomoSimError("MoMo PIN must be a 4-digit code (simulated check).");
+      return;
+    }
+    setMomoSimError(null);
+    setIsPaying(true);
+    try {
+      const res = await fetch(`/api/bills/${selectedBill.id}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: selectedBill.outstandingAmount,
+          channel: activeMsgChannel === "whatsapp" ? "WhatsApp USSD Link" : "Carrier SMS Dispatch Prompt",
+          reference: `TXN-SAND-${Math.floor(100000 + Math.random() * 900000)}`
+        })
+      });
+
+      if (!res.ok) throw new Error("Sandbox payment declined by Gateway.");
+
+      const result = await res.json();
+      setBills(bills.map(b => b.id === selectedBill.id ? result.bill : b));
+      setSelectedBill(result.bill);
+      setMomoSimTxnSuccess(true);
+      setMomoPhone("");
+      setPayAmount("");
+
+      // Add to audit telemetry
+      setAutodispatchLogs([
+        { 
+          id: `LOG-${Date.now()}`, 
+          time: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute:'2-digit'}), 
+          message: `✓ Sandbox Portal Success: GH₵ ${selectedBill.outstandingAmount.toFixed(2)} parsed to GWCL via MTNs Carrier gateway. Customer state for ${selectedBill.customerName} set to Paid.`, 
+          severity: "info" 
+        },
+        ...autodispatchLogs
+      ]);
+
+      const resDistricts = await fetch("/api/districts");
+      setDistricts(await resDistricts.json());
+    } catch (err: any) {
+      setMomoSimError(err.message);
     } finally {
       setIsPaying(false);
     }
@@ -357,6 +446,29 @@ export default function App() {
       setAuditResult("Failed to perform national audit sweep. Details: " + err.message);
     } finally {
       setIsAuditing(false);
+    }
+  };
+
+  // Generate specialized local MoMo payment reminder SMS via Gemini AI
+  const handleGenerateSmartSMS = async (billId: string) => {
+    try {
+      setFetchingSMS(true);
+      setSmsDispatchedNotification(false);
+      setSmartSMSContent("");
+      
+      const res = await fetch(`/api/bills/${billId}/generate-sms`, {
+        method: "POST"
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSmartSMSContent(data.sms);
+      } else {
+        throw new Error(data.error || "SMS draft pipeline failed.");
+      }
+    } catch (err: any) {
+      setSmartSMSContent(`GWCL NOTICE: Outstanding balance on Meter. Immediate payment required via local MoMo gateway.`);
+    } finally {
+      setFetchingSMS(false);
     }
   };
 
@@ -584,43 +696,96 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Side widget: Rapid National AI Loss Insight Warning Panel */}
-                      <div className="bg-[#0A3C6B] text-white p-6 rounded-2xl border border-[#1E4E7E] shadow-sm flex flex-col justify-between">
-                        <div>
-                          <div className="flex items-center gap-2 bg-[#EA9E1A] text-slate-950 font-mono text-[10px] font-bold px-2.5 py-1 rounded-md w-max mb-4">
-                            <Sparkles className="w-3.5 h-3.5" />
-                            GEMINI DIRECTIVES
+                      {/* Right Hand Sidebar: AI Directives & Real-time Action Logger */}
+                      <div className="space-y-6 flex flex-col">
+                        {/* Side widget: Rapid National AI Loss Insight Warning Panel */}
+                        <div className="bg-[#0A3C6B] text-white p-6 rounded-2xl border border-[#1E4E7E] shadow-sm flex flex-col justify-between" id="insight-warning-panel">
+                          <div>
+                            <div className="flex items-center gap-2 bg-[#EA9E1A] text-slate-950 font-mono text-[10px] font-bold px-2.5 py-1 rounded-md w-max mb-4">
+                              <Sparkles className="w-3.5 h-3.5" />
+                              GEMINI DIRECTIVES
+                            </div>
+                            
+                            <h3 className="text-lg font-display font-bold mb-3 leading-tight text-white">
+                              Accra & Tema Critical Intervention Required
+                            </h3>
+                            
+                            <p className="text-sm text-sky-100/90 leading-relaxed mb-4">
+                              High-density monitoring at Tema Heavy Industrial Tank shows a staggering **{( (890000 - 756500) / 890000 * 100 ).toFixed(1)}% commercial bypass hazard**. Industrial block production and concrete mixers are drawing from unmetered bypass plumbing before main digital telemetry units.
+                            </p>
+                            
+                            <div className="bg-slate-900/40 border border-white/10 p-3.5 rounded-xl text-xs space-y-2.5 text-sky-200">
+                              <div className="flex items-center gap-2 font-mono">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                                <span>Pipes at Risk: Weija Asbestos Mains</span>
+                              </div>
+                              <div className="flex items-center gap-2 font-mono">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#EA9E1A]"></span>
+                                <span>Action: Flush illegal bypass in Accra West</span>
+                              </div>
+                            </div>
                           </div>
-                          
-                          <h3 className="text-lg font-display font-bold mb-3 leading-tight text-white">
-                            Accra & Tema Critical Intervention Required
-                          </h3>
-                          
-                          <p className="text-sm text-sky-100/90 leading-relaxed mb-4">
-                            High-density monitoring at Tema Heavy Industrial Tank shows a staggering **{( (890000 - 756500) / 890000 * 100 ).toFixed(1)}% commercial bypass hazard**. Industrial block production and concrete mixers are drawing from unmetered bypass plumbing before main digital telemetry units.
-                          </p>
-                          
-                          <div className="bg-slate-900/40 border border-white/10 p-3.5 rounded-xl text-xs space-y-2.5 text-sky-200">
-                            <div className="flex items-center gap-2 font-mono">
-                              <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                              <span>Pipes at Risk: Weija Asbestos Mains</span>
-                            </div>
-                            <div className="flex items-center gap-2 font-mono">
-                              <span className="w-1.5 h-1.5 rounded-full bg-[#EA9E1A]"></span>
-                              <span>Action: Flush illegal bypass in Accra West</span>
-                            </div>
+
+                          <div className="pt-6 border-t border-sky-400/20 mt-6 mt-auto">
+                            <button 
+                              id="btn-switch-tab-forensics"
+                              onClick={() => setActiveTab("forensics")}
+                              className="w-full flex items-center justify-between text-xs font-semibold bg-white/10 hover:bg-white/20 px-4 py-2.5 rounded-xl border border-white/10 transition"
+                            >
+                              <span>Initialize Technical Billing Audit</span>
+                              <ChevronRight className="w-4 h-4 text-[#EA9E1A]" />
+                            </button>
                           </div>
                         </div>
 
-                        <div className="pt-6 border-t border-sky-400/20 mt-6 mt-auto">
-                          <button 
-                            id="btn-switch-tab-forensics"
-                            onClick={() => setActiveTab("forensics")}
-                            className="w-full flex items-center justify-between text-xs font-semibold bg-white/10 hover:bg-white/20 px-4 py-2.5 rounded-xl border border-white/10 transition"
-                          >
-                            <span>Initialize Technical Billing Audit</span>
-                            <ChevronRight className="w-4 h-4 text-[#EA9E1A]" />
-                          </button>
+                        {/* Side widget: Live Technical Dispatch & Event Ticker Ticker Feed */}
+                        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between" id="realtime-event-feed-panel">
+                          <div>
+                            <div className="flex items-center justify-between gap-2 mb-3">
+                              <h4 className="font-semibold text-slate-800 text-xs uppercase font-sans tracking-wide">
+                                Real-Time Telemetry & Dispatch Feed
+                              </h4>
+                              <span className="flex items-center gap-1.5 text-[9px] font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full font-bold animate-pulse">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                LIVE
+                              </span>
+                            </div>
+                            
+                            <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
+                              Tracks cellular SMS dispatch actions, sensor flow updates, and Gemini AI validation sessions happening across Ghana grids.
+                            </p>
+
+                            <div className="space-y-2.5 max-h-[220px] overflow-y-auto pr-1">
+                              {autodispatchLogs.length === 0 ? (
+                                <div className="text-center py-6 text-slate-400 text-[11px] border border-dashed border-slate-100 rounded-lg">
+                                  No cellular dispatch logs found yet. Draft billing SMS notes to trigger carrier broadcasts.
+                                </div>
+                              ) : (
+                                autodispatchLogs.map((log) => (
+                                  <div key={log.id} className="p-2.5 text-[11px] rounded-lg border bg-slate-50 border-slate-100 flex flex-col gap-1">
+                                    <div className="flex justify-between items-center gap-2">
+                                      <span className={`text-[9px] uppercase font-bold px-1.5 rounded font-mono ${
+                                        log.severity === "danger" 
+                                          ? "bg-red-50 text-red-700" 
+                                          : log.severity === "warning"
+                                            ? "bg-amber-50 text-amber-700"
+                                            : "bg-blue-50 text-[#0A3C6B]"
+                                      }`}>
+                                        {log.severity || "info"}
+                                      </span>
+                                      <span className="text-[9px] font-mono text-slate-400">{log.time}</span>
+                                    </div>
+                                    <p className="text-slate-700 font-sans leading-normal">{log.message}</p>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                            <span>Grid Carrier Service Status:</span>
+                            <span className="text-emerald-500 font-bold">100% Operational</span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -803,35 +968,55 @@ export default function App() {
                           <div className="relative flex-1 flex flex-col justify-around py-4">
                             
                             {/* Marker: Tamale */}
-                            <div className="absolute top-10 left-1/2 -translate-x-1/2 flex flex-col items-center group cursor-pointer">
-                              <div className="w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[9px] border-2 border-white ring-2 ring-emerald-300">
+                            <div 
+                              onClick={() => setSelectedMapDistrict("Tamale Central (Northern)")}
+                              className={`absolute top-10 left-1/2 -translate-x-1/2 flex flex-col items-center group cursor-pointer transition-all duration-200 hover:scale-110 ${selectedMapDistrict === "Tamale Central (Northern)" ? "scale-110 z-20" : ""}`}
+                            >
+                              <div className={`w-4 h-4 rounded-full flex items-center justify-center text-white text-[9px] border-2 border-white ring-2 transition-all ${
+                                selectedMapDistrict === "Tamale Central (Northern)" ? "bg-emerald-600 ring-emerald-300" : "bg-emerald-500 ring-emerald-300"
+                              }`}>
                                 T
                               </div>
                               <span className="text-[10px] bg-slate-950/80 text-white font-mono px-1 rounded mt-1">Tamale Sector</span>
                             </div>
 
                             {/* Marker: Adum Kumasi */}
-                            <div className="absolute top-1/2 left-1/4 flex flex-col items-center group cursor-pointer">
+                            <div 
+                              onClick={() => setSelectedMapDistrict("Kumasi Metro (Kejetia)")}
+                              className={`absolute top-1/2 left-1/4 flex flex-col items-center group cursor-pointer transition-all duration-200 hover:scale-110 ${selectedMapDistrict === "Kumasi Metro (Kejetia)" ? "scale-110 z-20" : ""}`}
+                            >
                               <span className="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-amber-400 opacity-75"></span>
-                              <div className="w-4.5 h-4.5 rounded-full bg-[#EA9E1A] flex items-center justify-center text-slate-900 font-bold text-[9px] border border-white">
+                              <div className={`w-4.5 h-4.5 rounded-full flex items-center justify-center text-slate-900 font-bold text-[9px] border border-white transition-all ${
+                                selectedMapDistrict === "Kumasi Metro (Kejetia)" ? "bg-amber-400 ring-2 ring-amber-300" : "bg-[#EA9E1A]"
+                              }`}>
                                 K
                               </div>
                               <span className="text-[9px] bg-white text-slate-800 font-sans font-bold px-1.5 border border-slate-200 rounded shadow mt-1">Kumasi (Alert)</span>
                             </div>
 
                             {/* Marker: Weija Accra West */}
-                            <div className="absolute bottom-16 left-1/3 flex flex-col items-center group cursor-pointer">
+                            <div 
+                              onClick={() => setSelectedMapDistrict("Accra West (Weija)")}
+                              className={`absolute bottom-16 left-1/3 flex flex-col items-center group cursor-pointer transition-all duration-200 hover:scale-110 ${selectedMapDistrict === "Accra West (Weija)" ? "scale-110 z-20" : ""}`}
+                            >
                               <span className="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-red-400 opacity-75"></span>
-                              <div className="w-5 h-5 rounded-full bg-red-600 flex items-center justify-center text-white font-bold text-[10px] stroke-white stroke-2 border-2 border-white">
+                              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white font-bold text-[10px] stroke-white stroke-2 border-2 border-white transition-all ${
+                                selectedMapDistrict === "Accra West (Weija)" ? "bg-red-700 ring-2 ring-red-400" : "bg-red-600"
+                              }`}>
                                 W
                               </div>
                               <span className="text-[9px] bg-white text-slate-800 shadow font-bold px-1.5 rounded mt-1">Accra West (Weija Break)</span>
                             </div>
 
                             {/* Marker: Tema Main */}
-                            <div className="absolute bottom-14 right-1/4 flex flex-col items-center group cursor-pointer">
+                            <div 
+                              onClick={() => setSelectedMapDistrict("Tema Industrial Area")}
+                              className={`absolute bottom-14 right-1/4 flex flex-col items-center group cursor-pointer transition-all duration-200 hover:scale-110 ${selectedMapDistrict === "Tema Industrial Area" ? "scale-110 z-20" : ""}`}
+                            >
                               <span className="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-red-400 opacity-75"></span>
-                              <div className="w-5 h-5 rounded-full bg-rose-600 flex items-center justify-center text-white text-[9px] border-2 border-white">
+                              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] border-2 border-white transition-all ${
+                                selectedMapDistrict === "Tema Industrial Area" ? "bg-rose-700 ring-2 ring-rose-400" : "bg-rose-600"
+                              }`}>
                                 T
                               </div>
                               <span className="text-[9px] bg-white text-slate-800 block shadow font-bold px-1.5 rounded mt-1">Tema (Theft Risk)</span>
@@ -1214,6 +1399,35 @@ export default function App() {
                         </button>
                       </form>
 
+                      {selectedTicket.photoUrl && (
+                        <div className="mt-5 pt-4 border-t border-slate-100">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase font-mono block mb-2">Attached Photo Evidence</span>
+                          <div className="w-full h-40 rounded-xl overflow-hidden border border-slate-200 bg-slate-50 relative flex items-center justify-center shadow-inner">
+                            {selectedTicket.photoUrl === "mains-leak-prefetched" ? (
+                              <div className="w-full h-full bg-gradient-to-b from-blue-400/95 to-blue-700 flex flex-col items-center justify-center text-white p-4">
+                                <Droplet className="w-8 h-8 text-sky-200 animate-pulse mb-1" />
+                                <span className="font-bold text-xs uppercase tracking-wider">Mains PVC Burst Evidence</span>
+                                <span className="text-[10px] text-sky-100 mt-1">Spintex Sector High-Pressure Jetting</span>
+                              </div>
+                            ) : selectedTicket.photoUrl === "meter-bypass-prefetched" ? (
+                              <div className="w-full h-full bg-gradient-to-b from-amber-500/95 to-amber-700 flex flex-col items-center justify-center text-white p-4">
+                                <AlertTriangle className="w-8 h-8 text-amber-200 animate-bounce mb-1" />
+                                <span className="font-bold text-xs uppercase tracking-wider">Industrial Bypass Tap</span>
+                                <span className="text-[10px] text-amber-100 mt-1">Direct pre-meter hookup bypass block</span>
+                              </div>
+                            ) : selectedTicket.photoUrl === "seepage-evidence-prefetched" ? (
+                              <div className="w-full h-full bg-gradient-to-b from-emerald-500/95 to-teal-700 flex flex-col items-center justify-center text-white p-4">
+                                <Layers className="w-8 h-8 text-emerald-200 animate-pulse mb-1" />
+                                <span className="font-bold text-xs uppercase tracking-wider">Pavement Seepage Evidence</span>
+                                <span className="text-[10px] text-teal-100 mt-1 font-sans">Subsoil water bubbling up under asphalt</span>
+                              </div>
+                            ) : (
+                              <img src={selectedTicket.photoUrl} alt="Attached incident evidence" className="w-full h-full object-cover animate-fade-in" referrerPolicy="no-referrer" />
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {selectedTicket.reporterName && (
                         <div className="mt-6 pt-4 border-t border-slate-100 text-xs text-slate-500 space-y-1">
                           <span className="font-semibold text-slate-700 block mb-1">Reporter Information</span>
@@ -1238,6 +1452,52 @@ export default function App() {
                     <h3 className="text-base font-display font-semibold text-slate-800 mb-2">Technical Discrepancy Simulator</h3>
                     <p className="text-xs text-slate-500 mb-4">Input custom flow rates representing real-time bypass pipe zones to generate an instant Gemini geological anomaly interpretation.</p>
 
+                    {/* Quick Diagnostic Presets */}
+                    <div className="mb-4 bg-slate-50 p-3 rounded-xl border border-slate-200 text-[10px] space-y-1.5" id="diagnostic-presets">
+                      <span className="font-bold text-slate-500 block uppercase font-mono mb-1 tracking-wider">Field Lab Sandbox Presets</span>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          id="preset-spintex-bypass"
+                          type="button"
+                          onClick={() => {
+                            setCustomFlowIn(650);
+                            setCustomFlowOut(320);
+                            setCustomPressure(3.8);
+                            setSandboxAnalysis(null);
+                          }}
+                          className="bg-white hover:bg-slate-100 border border-slate-200 rounded p-1.5 font-sans font-bold text-[#0A3C6B] truncate text-center text-[9px] transition"
+                        >
+                          ⚙️ Spintex Bypass
+                        </button>
+                        <button
+                          id="preset-weija-leak"
+                          type="button"
+                          onClick={() => {
+                            setCustomFlowIn(380);
+                            setCustomFlowOut(190);
+                            setCustomPressure(1.4);
+                            setSandboxAnalysis(null);
+                          }}
+                          className="bg-white hover:bg-slate-100 border border-slate-200 rounded p-1.5 font-sans font-bold text-rose-700 truncate text-center text-[9px] transition"
+                        >
+                          💧 Weija Main Leak
+                        </button>
+                        <button
+                          id="preset-adum-normal"
+                           type="button"
+                           onClick={() => {
+                             setCustomFlowIn(120);
+                             setCustomFlowOut(114);
+                             setCustomPressure(2.6);
+                             setSandboxAnalysis(null);
+                           }}
+                           className="bg-white hover:bg-slate-100 border border-slate-200 rounded p-1.5 font-sans font-bold text-slate-700 truncate text-center text-[9px] transition"
+                        >
+                          ✓ Adum Standard
+                        </button>
+                      </div>
+                    </div>
+
                     <div className="space-y-3.5 text-xs text-slate-700">
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
@@ -1249,8 +1509,14 @@ export default function App() {
                           min="10" 
                           max="800" 
                           value={customFlowIn} 
-                          onChange={(e) => setCustomFlowIn(Number(e.target.value))}
-                          className="w-full"
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            setCustomFlowIn(val);
+                            if (customFlowOut > val) {
+                              setCustomFlowOut(val);
+                            }
+                          }}
+                          className="w-full accent-indigo-600"
                         />
                       </div>
 
@@ -1264,8 +1530,15 @@ export default function App() {
                           min="10" 
                           max="800" 
                           value={customFlowOut} 
-                          onChange={(e) => setCustomFlowOut(Number(e.target.value))}
-                          className="w-full"
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            if (val <= customFlowIn) {
+                              setCustomFlowOut(val);
+                            } else {
+                              setCustomFlowOut(customFlowIn);
+                            }
+                          }}
+                          className="w-full accent-[#0A3C6B]"
                         />
                       </div>
 
@@ -1281,8 +1554,57 @@ export default function App() {
                           step="0.1"
                           value={customPressure} 
                           onChange={(e) => setCustomPressure(Number(e.target.value))}
-                          className="w-full"
+                          className="w-full accent-sky-500"
                         />
+                      </div>
+
+                      {/* Hydrological Math/Leak Evaluator Realtime Results */}
+                      <div className="p-3 bg-slate-900 text-white rounded-xl space-y-2 border border-slate-800" id="morm-math-calc">
+                        <div className="flex items-center justify-between text-[10px] uppercase font-bold text-[#EA9E1A] font-mono border-b border-white/10 pb-1.5">
+                          <span>Hydrological Calculations</span>
+                          <span className="text-white bg-slate-800 px-1.5 py-0.5 rounded">GWCL Tariff Formula V3</span>
+                        </div>
+                        
+                        {/* Metric calculations */}
+                        {(() => {
+                          const lossFlow = Math.max(0, customFlowIn - customFlowOut);
+                          const nrwPercent = customFlowIn > 0 ? (lossFlow / customFlowIn) * 100 : 0;
+                          const dailyLossVol = lossFlow * 86.4; // 1 L/s = 86.4 m3 per day
+                          const dailyLossRevenue = dailyLossVol * 15.5; // GWCL Rate: GH₵ 15.50 per m3
+
+                          let severityBadge = "bg-emerald-500 text-white";
+                          let severityText = "Normal Drift";
+                          if (nrwPercent > 35) {
+                            severityBadge = "bg-red-600 text-white";
+                            severityText = "High Loss / suspected theft";
+                          } else if (nrwPercent > 10) {
+                            severityBadge = "bg-amber-500 text-slate-950";
+                            severityText = "Moderate pipe anomaly";
+                          }
+
+                          return (
+                             <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                               <div>
+                                 <span className="text-slate-400 block text-[9px]">NRW Water Loss Rate</span>
+                                 <strong className="text-sm font-bold block mt-0.5">{nrwPercent.toFixed(1)}%</strong>
+                               </div>
+                               <div>
+                                 <span className="text-slate-400 block text-[9px]">Anomalous Velocity</span>
+                                 <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase inline-block mt-0.5 ${severityBadge}`}>
+                                   {severityText}
+                                 </span>
+                               </div>
+                               <div className="border-t border-white/5 pt-1.5">
+                                 <span className="text-slate-400 block text-[9px]">Equivalent Daily Loss</span>
+                                 <strong className="block mt-0.5 text-orange-400">{dailyLossVol.toFixed(1)} m³</strong>
+                               </div>
+                               <div className="border-t border-white/5 pt-1.5">
+                                 <span className="text-slate-450 block text-[9px]">Lost Revenue (24h Est)</span>
+                                 <strong className="block mt-0.5 text-rose-400">GH₵ {dailyLossRevenue.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</strong>
+                               </div>
+                             </div>
+                           );
+                        })()}
                       </div>
 
                       <div className="pt-2">
@@ -1512,6 +1834,131 @@ export default function App() {
                           </div>
                         </div>
 
+                        {/* Interactive Photo Evidence Sandbox */}
+                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 mt-4" id="photo-evidence-section">
+                          <label className="text-xs font-semibold text-slate-700 block mb-1">
+                            Attach Digital Photo Evidence
+                          </label>
+                          <p className="text-[10px] text-slate-500 mb-3 leading-relaxed">
+                            Upload a JPEG/PNG photo or tap a pre-captured Field Taskforce snapshot below to instantly simulate telemetry/structural validation.
+                          </p>
+
+                          {/* Preloaded snapshot cards */}
+                          <div className="grid grid-cols-3 gap-2.5 mb-3">
+                            <button
+                              id="btn-photo-preset-burst"
+                              type="button"
+                              onClick={() => {
+                                setCustomPhotoUploadName("Preset_Burst_Pipe_Spintex.jpg");
+                                setAttachedPhoto("mains-leak-prefetched");
+                              }}
+                              className={`p-2 rounded-lg border text-left transition relative overflow-hidden aspect-video flex flex-col justify-between cursor-pointer ${
+                                customPhotoUploadName === "Preset_Burst_Pipe_Spintex.jpg"
+                                  ? "ring-2 ring-[#0A3C6B] border-transparent"
+                                  : "border-slate-200 hover:border-slate-300"
+                              }`}
+                            >
+                              <div className="absolute inset-0 bg-gradient-to-b from-blue-400/90 to-blue-700 opacity-90 z-0"></div>
+                              <div className="relative z-10 flex flex-col justify-between h-full text-white text-[9px]">
+                                <Droplet className="w-3.5 h-3.5 text-sky-200 animate-pulse" />
+                                <span className="font-bold leading-tight font-sans drop-shadow-sm">Mains PVC Burst</span>
+                              </div>
+                            </button>
+
+                            <button
+                              id="btn-photo-preset-bypass"
+                              type="button"
+                              onClick={() => {
+                                setCustomPhotoUploadName("Preset_Industrial_Bypass_Heavy.jpg");
+                                setAttachedPhoto("meter-bypass-prefetched");
+                              }}
+                              className={`p-2 rounded-lg border text-left transition relative overflow-hidden aspect-video flex flex-col justify-between cursor-pointer ${
+                                customPhotoUploadName === "Preset_Industrial_Bypass_Heavy.jpg"
+                                  ? "ring-2 ring-[#0A3C6B] border-transparent"
+                                  : "border-slate-200 hover:border-slate-300"
+                              }`}
+                            >
+                              <div className="absolute inset-0 bg-gradient-to-b from-amber-500/90 to-amber-700 opacity-90 z-0"></div>
+                              <div className="relative z-10 flex flex-col justify-between h-full text-white text-[9px]">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-200" />
+                                <span className="font-bold leading-tight font-sans drop-shadow-sm">Bypass Pipe Tap</span>
+                              </div>
+                            </button>
+
+                            <button
+                              id="btn-photo-preset-ground"
+                              type="button"
+                              onClick={() => {
+                                setCustomPhotoUploadName("Preset_Weija_Seepage_Pavement.jpg");
+                                setAttachedPhoto("seepage-evidence-prefetched");
+                              }}
+                              className={`p-2 rounded-lg border text-left transition relative overflow-hidden aspect-video flex flex-col justify-between cursor-pointer ${
+                                customPhotoUploadName === "Preset_Weija_Seepage_Pavement.jpg"
+                                  ? "ring-2 ring-[#0A3C6B] border-transparent"
+                                  : "border-slate-200 hover:border-slate-300"
+                              }`}
+                            >
+                              <div className="absolute inset-0 bg-gradient-to-b from-emerald-500/90 to-teal-700 opacity-90 z-0"></div>
+                              <div className="relative z-10 flex flex-col justify-between h-full text-white text-[9px]">
+                                <Layers className="w-3.5 h-3.5 text-emerald-200" />
+                                <span className="font-bold leading-tight font-sans drop-shadow-sm">Subsoil Seepage</span>
+                              </div>
+                            </button>
+                          </div>
+
+                          {/* File Input and Live View Section */}
+                          <div className="flex flex-col gap-2">
+                            {attachedPhoto ? (
+                              <div className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between text-xs transition animate-fade-in">
+                                <div className="flex items-center gap-2">
+                                  {/* Thumbnail Preview rendering based on source */}
+                                  <div className="w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-slate-100 flex items-center justify-center relative">
+                                    {attachedPhoto === "mains-leak-prefetched" ? (
+                                      <div className="w-full h-full bg-gradient-to-b from-blue-400 to-blue-600 flex items-center justify-center text-white"><Droplet className="w-5 h-5" /></div>
+                                    ) : attachedPhoto === "meter-bypass-prefetched" ? (
+                                      <div className="w-full h-full bg-gradient-to-b from-amber-400 to-amber-600 flex items-center justify-center text-white"><AlertTriangle className="w-5 h-5" /></div>
+                                    ) : attachedPhoto === "seepage-evidence-prefetched" ? (
+                                      <div className="w-full h-full bg-gradient-to-b from-emerald-400 to-teal-600 flex items-center justify-center text-white"><Layers className="w-5 h-5" /></div>
+                                    ) : (
+                                      <img src={attachedPhoto} alt="Evidence thumbnail" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                    )}
+                                  </div>
+                                  <div className="text-[11px]">
+                                    <span className="font-semibold text-slate-800 block truncate max-w-[180px]">{customPhotoUploadName || "Evidence_Photo.png"}</span>
+                                    <span className="text-[9px] text-slate-400 font-mono">Ready for Dispatch Transmit</span>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAttachedPhoto(null);
+                                    setCustomPhotoUploadName("");
+                                  }}
+                                  className="text-rose-500 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 p-1.5 rounded-lg text-[10px] font-semibold font-mono"
+                                >
+                                  Clear Image
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center justify-center border border-dashed border-slate-300 rounded-xl p-4 bg-white hover:bg-slate-50 transition">
+                                <label className="cursor-pointer text-center w-full block">
+                                  <div className="flex flex-col items-center gap-1">
+                                    <Laptop className="w-5 h-5 text-slate-400" />
+                                    <span className="text-[11px] font-medium text-[#0A3C6B]">Click to browse files or drag evidence here</span>
+                                    <span className="text-[9px] text-slate-400">Supports JPG, PNG up to 5MB</span>
+                                  </div>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={handlePhotoUploadChange}
+                                    className="hidden"
+                                  />
+                                </label>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
                         <button
                           id="citizen-report-btn-submit"
                           type="submit"
@@ -1719,6 +2166,347 @@ export default function App() {
                               </div>
                             </div>
                           )}
+
+                          {/* AI Cellular / WhatsApp Interactive Sandbox Portal */}
+                          <div className="mt-8 pt-6 border-t border-slate-100 bg-slate-50 -mx-6 px-6 pb-6 rounded-b-2xl animate-fade-in" id="sms-dispatcher-panel">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+                              <div>
+                                <div className="flex items-center gap-1.5 mb-1.5">
+                                  <span className="p-1 px-2 bg-indigo-100 text-indigo-700 text-[9px] uppercase font-bold rounded font-mono">
+                                    Gemini Revenue Safe Edge
+                                  </span>
+                                  <span className="text-[9px] text-[#0A3C6B] font-semibold bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded font-mono">
+                                    Fintech Link Simulated
+                                  </span>
+                                </div>
+                                <h4 className="font-semibold text-slate-900 text-sm">Interactive Cellular Sandbox Portal</h4>
+                                <p className="text-[11px] text-slate-500 max-w-sm">Simulate dual-channel dispatch. Customers receive notifications with clickable direct pay links acting as Instant MoMo integrations.</p>
+                              </div>
+
+                              {/* Channel Selector Toggle */}
+                              <div className="flex bg-slate-200/80 p-1 rounded-xl border border-slate-300/30 w-fit shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveMsgChannel("sms");
+                                    setMomoSimTxnSuccess(false);
+                                    setShowPhoneUSSD(false);
+                                  }}
+                                  className={`px-3 py-1.5 text-[10px] font-bold rounded-lg transition ${
+                                    activeMsgChannel === "sms"
+                                      ? "bg-slate-900 text-white shadow-sm"
+                                      : "text-slate-600 hover:text-slate-900"
+                                  }`}
+                                >
+                                  📨 Carrier SMS
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveMsgChannel("whatsapp");
+                                    setMomoSimTxnSuccess(false);
+                                    setShowPhoneUSSD(false);
+                                  }}
+                                  className={`px-3 py-1.5 text-[10px] font-bold rounded-lg transition ${
+                                    activeMsgChannel === "whatsapp"
+                                      ? "bg-emerald-600 text-white shadow-sm"
+                                      : "text-slate-600 hover:text-slate-900"
+                                  }`}
+                                >
+                                  💬 WhatsApp Gwid
+                                </button>
+                              </div>
+                            </div>
+
+                            {smsDispatchedNotification ? (
+                              <div className="bg-emerald-50 text-emerald-800 p-3.5 rounded-xl border border-emerald-200 mb-4 text-[11px]" id="alert-dispatched-success">
+                                <span className="font-bold block">✓ Dispatch Queue Executed Successfully</span>
+                                <p className="text-[10px] text-slate-500 mt-1">Repayment notice transmitted. Real-time telecom logs registered inside the main interactive telemetry ticker.</p>
+                              </div>
+                            ) : null}
+
+                            {/* Dual layout: Draft Controls + Interactive Smartphone Mockup */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start mt-4">
+                              
+                              {/* Left Controls: Draft generation trigger & copy utilities */}
+                              <div className="space-y-4">
+                                <div className="p-4 bg-white rounded-xl border border-slate-200/80 space-y-3 shadow-sm">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase font-mono block">Drafting Dashboard</span>
+                                  
+                                  {smartSMSContent ? (
+                                    <div className="space-y-3">
+                                      <div className="text-[11px] text-slate-700 bg-slate-50 p-3 rounded-lg border border-slate-100 font-sans max-h-48 overflow-y-auto whitespace-pre-line leading-relaxed">
+                                        {smartSMSContent}
+                                      </div>
+                                      
+                                      <div className="flex gap-2">
+                                        <button
+                                          id="btn-trigger-copy-sms"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(smartSMSContent);
+                                            alert("Copied customized notice draft to clipboard!");
+                                          }}
+                                          type="button"
+                                          className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-[10px] py-2 rounded-lg transition text-center"
+                                        >
+                                          Copy Text Raw
+                                        </button>
+                                        <button
+                                          id="btn-trigger-dispatch-sim"
+                                          onClick={() => {
+                                            setSmsDispatchedNotification(true);
+                                            // Add to audit logs
+                                            setAutodispatchLogs([
+                                              { 
+                                                id: `LOG-${Date.now()}`, 
+                                                time: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute:'2-digit'}), 
+                                                message: `Direct Dispatch: Custom AI bill reminder dispatched via ${activeMsgChannel.toUpperCase()} pipeline to ${selectedBill?.customerName} (${selectedBill?.meterNumber}).`, 
+                                                severity: "info" 
+                                              },
+                                              ...autodispatchLogs
+                                            ]);
+                                          }}
+                                          type="button"
+                                          className="flex-1 bg-[#0A3C6B] hover:bg-[#0A3C6B]/90 text-white font-bold text-[10px] py-2 rounded-lg transition shadow-sm"
+                                        >
+                                          Dispatch To Consumer
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="text-center py-4 bg-slate-50 rounded-lg border border-dashed border-slate-200">
+                                      <p className="text-[11px] text-slate-400 px-3">No active draft text compiled yet. Trigger Gemini AI below to instantly generate localized text.</p>
+                                    </div>
+                                  )}
+
+                                  <button
+                                    id="btn-trigger-draft-ai-sms"
+                                    onClick={() => {
+                                      if (selectedBill) {
+                                        setMomoSimTxnSuccess(false);
+                                        setShowPhoneUSSD(false);
+                                        handleGenerateSmartSMS(selectedBill.id);
+                                      }
+                                    }}
+                                    disabled={fetchingSMS}
+                                    type="button"
+                                    className="w-full bg-slate-950 hover:bg-slate-850 text-white font-bold py-2.5 rounded-lg transition text-xs flex items-center justify-center gap-2 shadow-sm"
+                                  >
+                                    {fetchingSMS ? (
+                                      <>
+                                        <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
+                                        <span>Querying Gemini Co-Agent...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Sparkles className="w-3.5 h-3.5 text-[#EA9E1A]" />
+                                        <span>{smartSMSContent ? "Regenerate Draft" : "Draft Custom Notice with AI"}</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+
+                                {/* Billing overview micro-audit widgets */}
+                                <div className="bg-slate-900 text-slate-300 p-4 rounded-xl space-y-2 border border-slate-850">
+                                  <div className="flex items-center gap-1 text-[10px] font-bold text-[#EA9E1A] uppercase font-mono">
+                                    <ShieldCheck className="w-3.5 h-3.5" />
+                                    <span>Interactive Sandbox Console</span>
+                                  </div>
+                                  <p className="text-[10px] leading-relaxed text-slate-400">
+                                    The phone simulator to the right displays the exact, formatted consumer interface. Click the green interactive payment button inside the simulated screen to test live MoMo payment logic in the ledger.
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* Right Column: Physical-looking Smartphone Frame Preview & USSD Simulator */}
+                              <div className="w-full max-w-[280px] mx-auto bg-[#0d121c] p-3.5 rounded-[40px] border-4 border-slate-700 shadow-2xl relative select-none">
+                                {/* Speaker notch & camera pill */}
+                                <div className="w-24 h-4.5 bg-slate-900 rounded-full mx-auto absolute top-1.5 left-1/2 -translate-x-1/2 z-50 flex items-center justify-center">
+                                  <div className="w-8 h-1 bg-slate-850 rounded-full"></div>
+                                </div>
+
+                                {/* Simulated glass screen container */}
+                                <div className="bg-slate-100 rounded-[28px] overflow-hidden aspect-[9/18] relative flex flex-col justify-between border border-slate-900 shadow-inner text-slate-800" style={{ height: "430px" }}>
+                                  
+                                  {/* Mobile OS Header bar */}
+                                  <div className={`p-2 pt-4 px-3 flex items-center justify-between text-[8px] font-bold tracking-tight shrink-0 select-none ${
+                                    activeMsgChannel === "whatsapp" ? "bg-emerald-800 text-white" : "bg-slate-100 text-slate-500"
+                                  }`}>
+                                    <span className="font-mono">15:18</span>
+                                    <div className="flex items-center gap-1.5 font-mono">
+                                      <span>MTN-GH 4G</span>
+                                      <span>⚡ 84%</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Simulated App Header */}
+                                  <div className={`p-2.5 px-3 border-b flex items-center gap-2 select-none shrink-0 ${
+                                    activeMsgChannel === "whatsapp" 
+                                      ? "bg-emerald-700 border-transparent text-white" 
+                                      : "bg-white border-slate-200 text-slate-800"
+                                  }`}>
+                                    <div className="w-6 h-6 rounded-full bg-slate-300 text-slate-800 flex items-center justify-center text-[10px] font-bold border border-slate-100/20 shadow-sm shrink-0">
+                                      💧
+                                    </div>
+                                    <div className="leading-tight truncate">
+                                      <span className="font-bold text-[10px] block truncate">GWCL Water Authority</span>
+                                      <span className="text-[7.5px] opacity-75 font-medium block">Verified Billing Gateway</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Simulated App Chat Wallpaper / Body */}
+                                  <div className="flex-1 p-3 overflow-y-auto relative flex flex-col justify-end bg-slate-100" style={{
+                                    backgroundImage: activeMsgChannel === "whatsapp" 
+                                      ? "radial-gradient(#128c7e 0.4px, transparent 0.4px), radial-gradient(#128c7e 0.4px, #e5ddd5 0.4px)"
+                                      : "none",
+                                    backgroundSize: "12px 12px"
+                                  }}>
+                                    
+                                    {/* USSD Dialog Overlaid Mockup */}
+                                    {showPhoneUSSD && (
+                                      <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-3.5 z-40 transition-all animate-fade-in text-xs">
+                                        {momoSimTxnSuccess ? (
+                                          <div className="bg-white p-4 rounded-xl border-t-4 border-emerald-500 text-center text-slate-800 space-y-2.5 shadow-xl max-w-[220px]">
+                                            <div className="w-9 h-9 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto text-sm">
+                                              ✓
+                                            </div>
+                                            <h5 className="font-display font-extrabold text-slate-900 text-[11px] leading-tight mt-1">GH₵ {selectedBill.usageKlh ? 'Paid Successfully' : 'Outstanding Balance Settled'}</h5>
+                                            <p className="text-[9px] text-slate-500 font-sans leading-tight">Ghana MoMo database updated. Ledger receipts logged in water grid portal.</p>
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setShowPhoneUSSD(false);
+                                                setMomoSimTxnSuccess(false);
+                                                setMomoSimInputCode("");
+                                                setMomoSimError(null);
+                                              }}
+                                              className="w-full bg-[#0A3C6B] text-white hover:bg-slate-900 text-[9px] font-bold py-1.5 rounded transition uppercase"
+                                            >
+                                              Exit Sandbox
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <div className="bg-[#fcb900] p-4 rounded-xl text-slate-950 space-y-3.5 shadow-xl font-sans max-w-[210px] border border-amber-500">
+                                            <div className="text-center font-bold text-[10.5px] tracking-wide pb-1 border-b border-amber-950/20">
+                                              MTN MoMo Instant Pay
+                                            </div>
+                                            <div className="space-y-1 text-[9.5px]">
+                                              <p className="leading-tight">Do you authorize payment of <strong>GH₵ {selectedBill.outstandingAmount.toFixed(2)}</strong> to <strong>Ghana Water Company GWCL</strong>?</p>
+                                              {momoSimError && <p className="text-red-800 font-bold font-mono text-[8px] mt-1">{momoSimError}</p>}
+                                            </div>
+
+                                            <div className="space-y-1">
+                                              <span className="text-[8.5px] font-semibold text-slate-950 block">Enter 4-Digit MoMo PIN:</span>
+                                              <input
+                                                type="password"
+                                                maxLength={4}
+                                                required
+                                                value={momoSimInputCode}
+                                                onChange={(e) => setMomoSimInputCode(e.target.value)}
+                                                placeholder="e.g. 1234"
+                                                className="w-full text-center font-mono text-xs text-slate-950 bg-white border border-amber-600 rounded p-1"
+                                                disabled={isPaying}
+                                              />
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-2 text-[9px] font-bold">
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setShowPhoneUSSD(false);
+                                                  setMomoSimInputCode("");
+                                                  setMomoSimError(null);
+                                                }}
+                                                className="bg-amber-950 text-white hover:bg-red-800 py-1.5 rounded border border-transparent text-center"
+                                                disabled={isPaying}
+                                              >
+                                                Cancel
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={handleSimulatedMoMoSubmit}
+                                                className="bg-slate-950 text-white hover:bg-[#0A3C6B] py-1.5 rounded text-center"
+                                                disabled={isPaying}
+                                              >
+                                                {isPaying ? "Paying..." : "Send Pay"}
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* App Chat Bubbles */}
+                                    <div className="space-y-3.5">
+                                      {/* Received Greeting */}
+                                      <div className={`p-2.5 rounded-xl shadow-xs text-[9.5px] leading-relaxed max-w-[85%] font-sans ${
+                                        activeMsgChannel === "whatsapp" 
+                                          ? "bg-white text-slate-800 self-start" 
+                                          : "bg-slate-200 text-slate-800 self-start"
+                                      }`}>
+                                        Hello, this is the official Ghana Water billing dispatch.
+                                        <span className="text-[7px] text-slate-400 font-mono block text-right mt-1">15:15 ✓</span>
+                                      </div>
+
+                                      {/* Main generated message bubble */}
+                                      <div className={`p-2.5 rounded-xl shadow-xs text-[9.5px] leading-relaxed max-w-[90%] self-end font-sans flex flex-col ${
+                                        activeMsgChannel === "whatsapp" 
+                                          ? "bg-emerald-50 text-slate-900 border-l-4 border-emerald-500" 
+                                          : "bg-blue-600 text-white"
+                                      }`}>
+                                        <p className="italic">"{smartSMSContent || `Outstanding bill GH₵ ${selectedBill.outstandingAmount.toFixed(2)} is pending for meter ${selectedBill.meterNumber}. Please click pay link.`}"</p>
+                                        
+                                        {/* Dynamic link interface inside phone bubble */}
+                                        <div className="mt-2.5 pt-2.5 border-t border-slate-200/50 flex flex-col gap-1.5">
+                                          <span className="text-[8px] font-bold text-slate-400 font-mono block">Dynamic MoMo Payload Link:</span>
+                                          <button
+                                            type="button"
+                                            disabled={selectedBill.outstandingAmount <= 0}
+                                            onClick={() => {
+                                              setShowPhoneUSSD(true);
+                                              setMomoSimTxnSuccess(false);
+                                              setMomoSimInputCode("");
+                                              setMomoSimError(null);
+                                            }}
+                                            className={`w-full py-1.5 rounded text-center text-[9px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition ${
+                                              selectedBill.outstandingAmount <= 0
+                                                ? "bg-slate-200 text-slate-400 border border-transparent cursor-not-allowed"
+                                                : activeMsgChannel === "whatsapp"
+                                                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                                                  : "bg-amber-400 hover:bg-amber-500 text-slate-900"
+                                            }`}
+                                          >
+                                            <Wallet className="w-3 h-3" />
+                                            <span>{selectedBill.outstandingAmount <= 0 ? "Account Paid ✓" : "Pay with MoMo Portal"}</span>
+                                          </button>
+                                        </div>
+
+                                        <div className="text-[7px] font-mono flex items-center justify-between text-slate-400 mt-1 pb-0">
+                                          <span>15:18</span>
+                                          <span className="flex items-center gap-0.5">
+                                            {activeMsgChannel === "whatsapp" ? (
+                                              <span className="text-blue-500 font-bold">✓✓</span>
+                                            ) : (
+                                              <span>Delivered</span>
+                                            )}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                  </div>
+
+                                  {/* Simulated phone dock bar */}
+                                  <div className="p-2 border-t bg-slate-50 flex items-center gap-2 justify-between text-slate-400 text-[10px] select-none shrink-0" style={{ height: "36px" }}>
+                                    <span className="text-left flex-1 pl-1 font-sans text-[9px]">Type message...</span>
+                                    <button type="button" className="p-1 text-sky-500 font-bold font-mono text-[10px] pr-1.5">Send</button>
+                                  </div>
+
+                                </div>
+                              </div>
+
+                            </div>
+                          </div>
                         </div>
                       ) : (
                         <div className="bg-[#0A3C6B]/5 border border-dashed border-[#0A3C6B]/20 p-8 rounded-2xl flex flex-col items-center justify-center text-center">

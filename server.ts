@@ -241,7 +241,7 @@ app.get("/api/districts", (req, res) => {
 
 // Create new citizen or technican report
 app.post("/api/reports", async (req, res) => {
-  const { title, type, reporterName, reporterPhone, gpsLocation, locationDesc, region, severity } = req.body;
+  const { title, type, reporterName, reporterPhone, gpsLocation, locationDesc, region, severity, photoUrl } = req.body;
   if (!title || !type) {
     return res.status(400).json({ error: "Title and incident type are required fields." });
   }
@@ -266,7 +266,8 @@ app.post("/api/reports", async (req, res) => {
     status: "Pending",
     createdAt: new Date().toISOString(),
     aiAnalysis: diagInsights,
-    technicianNotes: ""
+    technicianNotes: "",
+    photoUrl: photoUrl || ""
   };
 
   // Add active diagnostic counts to corresponding district
@@ -472,6 +473,55 @@ Address the following points in beautiful structured Markdown format:
   } catch (err: any) {
     console.error("Gemini Audit Sweep execution error:", err);
     res.status(500).json({ error: "Failed to process AI audit sweep. " + err.message });
+  }
+});
+
+// AI Smart Balance SMS/WhatsApp reminder template draft for specific user using local context
+app.post("/api/bills/:id/generate-sms", async (req, res) => {
+  const { id } = req.params;
+  const bill = citizenBills.find(b => b.id === id);
+  if (!bill) {
+    return res.status(404).json({ error: "Billing record not found for SMS draft." });
+  }
+
+  if (!aiClient) {
+    return res.json({
+      success: true,
+      sms: `GWCL REMINDER: Dear ${bill.customerName}, your water account for meter ${bill.meterNumber} has an outstanding balance of GH₵ ${bill.outstandingAmount.toFixed(2)}. To avoid immediate service disconnection, kindly pay today via MTN MoMo (*170#), Telecel Cash (*110#), or AT Money. Medaase!`
+    });
+  }
+
+  try {
+    const prompt = `Compose a short, highly professional, polite but firm WhatsApp/SMS reminder for a Ghanaian customer regarding their unpaid water bill:
+- Customer Name: ${bill.customerName}
+- Outstanding Balance: GH₵ ${bill.outstandingAmount.toFixed(2)}
+- Meter Number: ${bill.meterNumber}
+- Due State: ${bill.status} (In Arrears)
+- District Sector: ${bill.region}
+
+Must mention:
+1. Quick payment options via local Ghanaian Mobile Money networks: MTN MoMo (*170#), Telecel Cash (*110#), or AT Money.
+2. The customer's meter number for account validation.
+3. Keep it brief (within 140-160 words max), clear, and add a respectful Ghanaian closure such as "Medaase" (Thank you). Do not include any placeholder symbols like [Customer Name] – put real values directly.`;
+
+    const response = await aiClient.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are the head of consumer relations and digital revenue accounting at Ghana Water Company Limited."
+      }
+    });
+
+    res.json({
+      success: true,
+      sms: response.text ? response.text.trim() : "Unable to generate custom prompt. Please use the manual billing template framework."
+    });
+  } catch (err: any) {
+    console.error("Gemini SMS Draft failure:", err);
+    res.json({
+      success: true,
+      sms: `GWCL BILLING NOTICE: Dear ${bill.customerName}, prompt payment of GH₵ ${bill.outstandingAmount.toFixed(2)} for Meter ${bill.meterNumber} (${bill.region}) is required to safeguard continuous flow. Please transfer using MoMo options. Medaase!`
+    });
   }
 });
 
