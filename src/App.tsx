@@ -1801,16 +1801,16 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      setSignInName("Officer Kofi");
-                      setSignInEmail("kofi.owusu@gwcl.gov.gh");
+                      setSignInName("Officer Kwame");
+                      setSignInEmail("kwame.owusu@gwcl.gov.gh");
                     }}
                     className={`p-2.5 text-left rounded-xl border text-xs transition cursor-pointer ${
-                      signInEmail === "kofi.owusu@gwcl.gov.gh"
+                      signInEmail === "kwame.owusu@gwcl.gov.gh"
                         ? "bg-[#0A3C6B]/5 border-[#0A3C6B] text-[#0A3C6B] font-semibold"
                         : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
                     }`}
                   >
-                    <span className="block font-medium text-slate-800">Officer Kofi</span>
+                    <span className="block font-medium text-slate-800">Officer Kwame</span>
                     <span className="text-[10px] text-slate-400">Field Technician</span>
                   </button>
                   <button
